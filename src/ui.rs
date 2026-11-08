@@ -870,7 +870,7 @@ impl SnarlWidget {
     /// Ignored if [`SnarlWidget::id`] was set.
     #[inline]
     #[must_use]
-    pub fn id_salt(mut self, id_salt: impl egui::AsId) -> Self {
+    pub fn id_salt(mut self, id_salt: impl egui::AsIdSalt) -> Self {
         self.id_salt = Id::new(id_salt);
         self
     }
