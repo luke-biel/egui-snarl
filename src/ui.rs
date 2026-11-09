@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use egui::{
-    Align, Color32, CornerRadius, Frame, Id, LayerId, Layout, Margin, Modifiers, PointerButton,
-    Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder, UiKind, UiStackInfo,
-    Vec2,
+    Align, Color32, CornerRadius, Frame, Id, IdSalt, LayerId, Layout, Margin, Modifiers,
+    PointerButton, Pos2, Rect, Scene, Sense, Shape, Stroke, StrokeKind, Style, Ui, UiBuilder,
+    UiKind, UiStackInfo, Vec2,
     collapsing_header::paint_default_icon,
     emath::{GuiRounding, TSTransform},
     epaint::Shadow,
@@ -35,7 +35,7 @@ pub use self::{
     background_pattern::{BackgroundPattern, Grid},
     pin::{AnyPins, PinInfo, PinShape, PinWireInfo, SnarlPin},
     state::get_selected_nodes,
-    viewer::SnarlViewer,
+    viewer::{HoveredWires, SnarlViewer},
     wire::{WireLayer, WireStyle},
 };
 
@@ -822,7 +822,7 @@ struct PinResponse {
 /// Widget to display [`Snarl`] graph in [`Ui`].
 #[derive(Clone, Copy, Debug)]
 pub struct SnarlWidget {
-    id_salt: Id,
+    id_salt: IdSalt,
     id: Option<Id>,
     style: SnarlStyle,
     min_size: Vec2,
@@ -842,7 +842,7 @@ impl SnarlWidget {
     #[must_use]
     pub fn new() -> Self {
         SnarlWidget {
-            id_salt: Id::new(":snarl:"),
+            id_salt: IdSalt::new(":snarl:"),
             id: None,
             style: SnarlStyle::new(),
             min_size: Vec2::ZERO,
@@ -871,7 +871,7 @@ impl SnarlWidget {
     #[inline]
     #[must_use]
     pub fn id_salt(mut self, id_salt: impl egui::AsIdSalt) -> Self {
-        self.id_salt = Id::new(id_salt);
+        self.id_salt = IdSalt::new(id_salt);
         self
     }
 
@@ -901,7 +901,7 @@ impl SnarlWidget {
 
     #[inline]
     fn get_id(&self, ui_id: Id) -> Id {
-        self.id.unwrap_or_else(|| ui_id.with(self.id_salt))
+        self.id.unwrap_or_else(|| ui_id.with_salt(self.id_salt))
     }
 
     /// Render [`Snarl`] using given viewer and style into the [`Ui`].
@@ -910,7 +910,7 @@ impl SnarlWidget {
     where
         V: SnarlViewer<T>,
     {
-        let snarl_id = self.get_id(ui.id());
+        let snarl_id = self.get_id(ui.scope_id());
 
         show_snarl(
             snarl_id,
@@ -1072,6 +1072,7 @@ where
 
     let mut nodes_bb = Rect::NOTHING;
     let mut node_rects = Vec::new();
+    let mut pointer_over_node = false;
 
     for node_idx in draw_order {
         if !snarl.nodes.contains(node_idx.0) {
@@ -1105,6 +1106,7 @@ where
             drag_released |= response.drag_released;
 
             nodes_bb = nodes_bb.union(response.final_rect);
+            pointer_over_node |= latest_pos.is_some_and(|pos| response.final_rect.contains(pos));
             if rect_selection_ended.is_some() {
                 node_rects.push((node_idx, response.final_rect));
             }
@@ -1112,6 +1114,7 @@ where
     }
 
     let mut hovered_wire = None;
+    let mut hovered_pins = None;
     let mut hovered_wire_disconnect = false;
     let mut wire_shapes = Vec::new();
 
@@ -1124,7 +1127,11 @@ where
             continue;
         };
 
-        if !snarl_state.has_new_wires() && snarl_resp.contains_pointer() && hovered_wire.is_none() {
+        if !snarl_state.has_new_wires()
+            && !pointer_over_node
+            && snarl_resp.contains_pointer()
+            && hovered_wire.is_none()
+        {
             // Try to find hovered wire
             // If not dragging new wire
             // And not hovering over item above.
@@ -1149,6 +1156,7 @@ where
 
                 if wire_hit {
                     hovered_wire = Some(wire);
+                    hovered_pins = Some((wire.out_pin, wire.in_pin));
 
                     let wire_r =
                         ui.interact(snarl_resp.rect, ui.make_persistent_id(wire), Sense::click());
@@ -1158,6 +1166,35 @@ where
                 }
             }
         }
+    }
+
+    let hovered_wires = match pin_hovered {
+        Some(AnyPin::Out(pin)) => Some(HoveredWires::Output(pin)),
+        _ => hovered_pins.map(|(from, to)| HoveredWires::Wire(from, to)),
+    };
+
+    // A click on a wire or an output pin keeps what it hovers highlighted, a
+    // click anywhere else lets it go.
+    let selected_id = snarl_id.with("selected-wires");
+    let mut selected_wires = ui
+        .ctx()
+        .data(|d| d.get_temp::<Option<HoveredWires>>(selected_id))
+        .flatten();
+    if snarl_resp.contains_pointer() && ui.input(|i| i.pointer.primary_clicked()) {
+        selected_wires = hovered_wires;
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(selected_id, selected_wires));
+    }
+    let hovered_wires = selected_wires.or(hovered_wires);
+
+    // Draw wires, once it is known which of them are hovered.
+    for wire in snarl.wires.iter() {
+        let Some(from_r) = output_info.get(&wire.out_pin) else {
+            continue;
+        };
+        let Some(to_r) = input_info.get(&wire.in_pin) else {
+            continue;
+        };
 
         let color = mix_colors(from_r.wire_color, to_r.wire_color);
 
@@ -1179,7 +1216,12 @@ where
             style.get_downscale_wire_frame(),
             from_r.pos,
             to_r.pos,
-            Stroke::new(draw_width, color),
+            viewer.wire_stroke(
+                wire.out_pin,
+                wire.in_pin,
+                hovered_wires,
+                Stroke::new(draw_width, color),
+            ),
             wire_threshold,
             pick_wire_style(from_r.wire_style, to_r.wire_style),
         );
@@ -1620,7 +1662,9 @@ where
         outputs_ui.scope_builder(builder, |pin_ui| {
             // Allocate space for pin shape.
             if let Some(output_spacing) = output_spacing {
-                let min = pin_ui.next_widget_position();
+                // Leftward: this ui fills from the right, and a rect past
+                // its edge would widen the column by a pin per row.
+                let min = pin_ui.next_widget_position() - vec2(output_spacing, 0.0);
                 pin_ui.advance_cursor_after_rect(Rect::from_min_size(
                     min,
                     vec2(output_spacing, pin_size),
@@ -1862,7 +1906,7 @@ where
         UiBuilder::new()
             .max_rect(node_frame_rect.round_ui())
             .layout(Layout::top_down(Align::Center))
-            .id(node_id),
+            .scope_id(node_id),
     );
 
     // Interact with node frame.

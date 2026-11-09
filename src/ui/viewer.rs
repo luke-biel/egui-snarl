@@ -1,11 +1,31 @@
-use egui::{emath::TSTransform, Painter, Pos2, Rect, Style, Ui};
+use egui::{Painter, Pos2, Rect, Stroke, Style, Ui, emath::TSTransform};
 
 use crate::{InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 
 use super::{
-    pin::{AnyPins, SnarlPin},
     BackgroundPattern, NodeLayout, SnarlStyle,
+    pin::{AnyPins, SnarlPin},
 };
+
+/// Wires under the pointer, or kept highlighted by a click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoveredWires {
+    /// One wire, from an output pin to an input pin.
+    Wire(OutPinId, InPinId),
+    /// Every wire leaving an output pin.
+    Output(OutPinId),
+}
+
+impl HoveredWires {
+    /// Whether the wire from `from` to `to` is among the hovered ones.
+    #[must_use]
+    pub fn contains(self, from: OutPinId, to: InPinId) -> bool {
+        match self {
+            Self::Wire(out_pin, in_pin) => (out_pin, in_pin) == (from, to),
+            Self::Output(out_pin) => out_pin == from,
+        }
+    }
+}
 
 /// `SnarlViewer` is a trait for viewing a Snarl.
 ///
@@ -351,5 +371,21 @@ pub trait SnarlViewer<T> {
     #[inline]
     fn current_transform(&mut self, to_global: &mut TSTransform, snarl: &mut Snarl<T>) {
         let _ = (to_global, snarl);
+    }
+
+    /// Returns the stroke of the wire from `from` to `to`, given `stroke` and
+    /// the wires under the pointer, if any.
+    ///
+    /// By default the stroke is left as it is.
+    #[inline]
+    fn wire_stroke(
+        &mut self,
+        from: OutPinId,
+        to: InPinId,
+        hovered: Option<HoveredWires>,
+        stroke: Stroke,
+    ) -> Stroke {
+        let _ = (from, to, hovered);
+        stroke
     }
 }
